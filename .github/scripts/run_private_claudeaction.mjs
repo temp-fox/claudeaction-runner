@@ -133,7 +133,7 @@ function runPrivateClaude(data) {
     FINAL_PROMPT: data.finalPrompt,
     CLAUDE_ACTION_PROBE_TIMEOUT_MS: process.env.CLAUDE_ACTION_PROBE_TIMEOUT_MS || '180000',
     CLAUDE_ACTION_FINAL_TIMEOUT_MS: process.env.CLAUDE_ACTION_FINAL_TIMEOUT_MS || '900000',
-    CLAUDE_ACTION_ALLOWED_TOOLS: 'Read,Glob,Grep,Edit,Write,Bash(pwd),Bash(ls),Bash(git status --short),Bash(git diff),Bash(git log --oneline:*)',
+    CLAUDE_ACTION_ALLOWED_TOOLS: 'Read,Glob,Grep,Edit,Write,Bash(pwd),Bash(ls),Bash(git status --short),Bash(git diff),Bash(git log --oneline:*),Bash(python -m json.tool:*)',
     CLAUDE_ACTION_DISABLE_STEP_SUMMARY: 'true',
   };
   requireSuccess(runStage('run-private-claude-sequence', ['node', 'scripts/run_claude_sequence.mjs'], { cwd: privateDir, env }), 'run-private-claude-sequence');
