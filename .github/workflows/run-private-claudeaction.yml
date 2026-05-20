@@ -20,7 +20,7 @@ jobs:
       CLAUDE_ACTION_PROVIDERS_JSON: ${{ secrets.CLAUDE_ACTION_PROVIDERS_JSON }}
     steps:
       - name: Checkout runner repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6.0.2
 
       - name: Run private claudeaction
         run: node .github/scripts/run_private_claudeaction.mjs

@@ -62,7 +62,7 @@ function runStage(stage, args, { cwd = workspace, env = {}, secrets = secretValu
     cwd,
     env: { ...process.env, ...env },
     encoding: 'utf8',
-    timeout: Number.parseInt(process.env.RUNNER_STAGE_TIMEOUT_MS || '900000', 10),
+    timeout: Number.parseInt(process.env.RUNNER_STAGE_TIMEOUT_MS || '1800000', 10),
   });
   writeLog(`${stage}.log`, [
     `stage=${stage}`,
@@ -129,6 +129,8 @@ function runPrivateClaude(data) {
     CLAUDE_BIN: `${process.env.HOME}/.local/bin/claude`,
     CLAUDE_ACTION_PROVIDERS_JSON: process.env.CLAUDE_ACTION_PROVIDERS_JSON,
     FINAL_PROMPT: data.finalPrompt || '请读取本仓库 .claude 配置并完成一次只读 smoke 检查。',
+    CLAUDE_ACTION_PROBE_TIMEOUT_MS: process.env.CLAUDE_ACTION_PROBE_TIMEOUT_MS || '180000',
+    CLAUDE_ACTION_FINAL_TIMEOUT_MS: process.env.CLAUDE_ACTION_FINAL_TIMEOUT_MS || '900000',
     CLAUDE_ACTION_ALLOWED_TOOLS: 'Read,Glob,Grep,Edit,Write,Bash(pwd),Bash(ls),Bash(git status --short),Bash(git diff),Bash(git log --oneline:*)',
     CLAUDE_ACTION_DISABLE_STEP_SUMMARY: 'true',
   };
