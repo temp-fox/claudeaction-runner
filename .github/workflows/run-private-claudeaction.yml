@@ -1,0 +1,26 @@
+name: Run private claudeaction
+
+on:
+  repository_dispatch:
+    types: [run_private_claudeaction]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: private-claudeaction
+  cancel-in-progress: false
+
+jobs:
+  run-private-claudeaction:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      PRIVATE_REPO_TOKEN: ${{ secrets.PRIVATE_REPO_TOKEN }}
+      CLAUDE_ACTION_PROVIDERS_JSON: ${{ secrets.CLAUDE_ACTION_PROVIDERS_JSON }}
+    steps:
+      - name: Checkout runner repository
+        uses: actions/checkout@v4
+
+      - name: Run private claudeaction
+        run: node .github/scripts/run_private_claudeaction.mjs
