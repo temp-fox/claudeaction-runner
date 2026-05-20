@@ -100,7 +100,13 @@ function payload() {
 }
 
 function maskKnownSecrets(privateRepository) {
-  for (const value of secretValues([privateRepository])) console.log(`::add-mask::${value}`);
+  for (const value of [
+    process.env.PRIVATE_REPO_TOKEN || '',
+    privateRepository,
+    ...providerSecretValues(),
+  ].filter(Boolean)) {
+    console.log(`::add-mask::${value}`);
+  }
 }
 
 function checkoutPrivate(data) {
