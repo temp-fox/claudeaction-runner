@@ -94,9 +94,10 @@ function payload() {
   const privateRepository = String(data.private_repository || '').trim();
   const privateRef = String(data.private_ref || 'main').trim() || 'main';
   const finalPrompt = String(data.final_prompt || '').trim();
+  const contentSkillRunsJson = String(data.content_skill_runs_json || '').trim();
   const upstreamRunId = String(data.upstream_run_id || '').trim();
   if (!privateRepository || !privateRepository.includes('/')) throw new RunnerError('resolve-payload');
-  return { privateRepository, privateRef, finalPrompt, upstreamRunId };
+  return { privateRepository, privateRef, finalPrompt, contentSkillRunsJson, upstreamRunId };
 }
 
 function maskKnownSecrets(privateRepository) {
@@ -128,7 +129,8 @@ function runPrivateClaude(data) {
   const env = {
     CLAUDE_BIN: `${process.env.HOME}/.local/bin/claude`,
     CLAUDE_ACTION_PROVIDERS_JSON: process.env.CLAUDE_ACTION_PROVIDERS_JSON,
-    FINAL_PROMPT: data.finalPrompt || '请读取本仓库 .claude 配置并完成一次只读 smoke 检查。',
+    CONTENT_SKILL_RUNS_JSON: data.contentSkillRunsJson,
+    FINAL_PROMPT: data.finalPrompt,
     CLAUDE_ACTION_PROBE_TIMEOUT_MS: process.env.CLAUDE_ACTION_PROBE_TIMEOUT_MS || '180000',
     CLAUDE_ACTION_FINAL_TIMEOUT_MS: process.env.CLAUDE_ACTION_FINAL_TIMEOUT_MS || '900000',
     CLAUDE_ACTION_ALLOWED_TOOLS: 'Read,Glob,Grep,Edit,Write,Bash(pwd),Bash(ls),Bash(git status --short),Bash(git diff),Bash(git log --oneline:*)',
@@ -166,7 +168,9 @@ function pushPrivateLogs(data, status, failedStage) {
   const secrets = secretValues([data.privateRepository]);
   requireSuccess(runStage('git-config-name', ['git', 'config', 'user.name', 'github-actions[bot]'], { cwd: privateDir, secrets }), 'git-config-name');
   requireSuccess(runStage('git-config-email', ['git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], { cwd: privateDir, secrets }), 'git-config-email');
-  requireSuccess(runStage('git-add-logs', ['git', 'add', '-f', 'logs'], { cwd: privateDir, secrets }), 'git-add-logs');
+  const pathsToAdd = ['logs'];
+  if (existsSync(join(privateDir, 'outputs'))) pathsToAdd.push('outputs');
+  requireSuccess(runStage('git-add-results', ['git', 'add', '-f', ...pathsToAdd], { cwd: privateDir, secrets }), 'git-add-results');
   const diff = runStage('git-diff-cached', ['git', 'diff', '--cached', '--quiet'], { cwd: privateDir, secrets });
   if (diff.status === 0) return;
   if (diff.status !== 1) throw new RunnerError('git-diff-cached');
@@ -189,6 +193,7 @@ function main() {
       private_repository: data.privateRepository,
       private_ref: data.privateRef,
       has_final_prompt: Boolean(data.finalPrompt),
+      has_content_skill_runs_json: Boolean(data.contentSkillRunsJson),
       upstream_run_id: data.upstreamRunId,
       started_at: nowIso(),
     }, secretValues([data.privateRepository]));
