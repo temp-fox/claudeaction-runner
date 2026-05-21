@@ -20,16 +20,19 @@ function nowIso() {
 }
 
 function providerSecretValues() {
-  try {
-    const parsed = JSON.parse(process.env.CLAUDE_ACTION_PROVIDERS_JSON || '[]');
-    if (!Array.isArray(parsed)) return [];
-    return parsed.flatMap((provider) => {
-      if (!provider || typeof provider !== 'object') return [];
-      return [provider.api_key, provider.key].filter(Boolean).map(String);
-    });
-  } catch {
-    return [];
+  const values = [process.env.IMAGE_PROVIDER_API_KEY].filter(Boolean).map(String);
+  for (const envName of ['CLAUDE_ACTION_PROVIDERS_JSON', 'IMAGE_PROVIDERS_JSON']) {
+    try {
+      const parsed = JSON.parse(process.env[envName] || '[]');
+      if (!Array.isArray(parsed)) continue;
+      values.push(...parsed.flatMap((provider) => {
+        if (!provider || typeof provider !== 'object') return [];
+        return [provider.api_key, provider.apiKey, provider.key].filter(Boolean).map(String);
+      }));
+    } catch {
+    }
   }
+  return values;
 }
 
 function secretValues(extra = []) {
@@ -136,6 +139,24 @@ function runPrivateClaude(data) {
     CLAUDE_ACTION_ALLOWED_TOOLS: 'Read,Glob,Grep,Edit,Write,Bash(pwd),Bash(ls),Bash(git status --short),Bash(git diff),Bash(git log --oneline:*),Bash(python -m json.tool:*)',
     CLAUDE_ACTION_STREAM_JSON_LOGS: 'true',
     CLAUDE_ACTION_DISABLE_STEP_SUMMARY: 'true',
+    CLAUDE_ACTION_POSTPROCESS: process.env.CLAUDE_ACTION_POSTPROCESS || 'true',
+    CLAUDE_ACTION_POSTPROCESS_STRICT: process.env.CLAUDE_ACTION_POSTPROCESS_STRICT || 'false',
+    IMAGE_GENERATION_ENABLED: process.env.IMAGE_GENERATION_ENABLED || '',
+    IMAGE_PROVIDERS_JSON: process.env.IMAGE_PROVIDERS_JSON || '',
+    IMAGE_PROVIDER_BASE_URL: process.env.IMAGE_PROVIDER_BASE_URL || '',
+    IMAGE_PROVIDER_API_KEY: process.env.IMAGE_PROVIDER_API_KEY || '',
+    IMAGE_PROVIDER_MODEL: process.env.IMAGE_PROVIDER_MODEL || '',
+    IMAGE_PROVIDER_TIMEOUT_SECONDS: process.env.IMAGE_PROVIDER_TIMEOUT_SECONDS || '',
+    IMAGE_PROVIDER_ASYNC_MODE: process.env.IMAGE_PROVIDER_ASYNC_MODE || '',
+    IMAGE_PROVIDER_ASYNC_POLL_INTERVAL_SECONDS: process.env.IMAGE_PROVIDER_ASYNC_POLL_INTERVAL_SECONDS || '',
+    IMAGE_MAX_IMAGES_PER_ARTICLE: process.env.IMAGE_MAX_IMAGES_PER_ARTICLE || '',
+    IMAGE_MAX_PARALLELISM: process.env.IMAGE_MAX_PARALLELISM || '',
+    IMAGE_RESPONSE_FORMAT: process.env.IMAGE_RESPONSE_FORMAT || '',
+    IMAGE_STRICT: process.env.IMAGE_STRICT || '',
+    SITE_WINDOW_DAYS: process.env.SITE_WINDOW_DAYS || '',
+    ARTICLE_IMAGE_BASE_URL: process.env.ARTICLE_IMAGE_BASE_URL || '',
+    POSTPROCESS_STRICT: process.env.POSTPROCESS_STRICT || '',
+    POSTPROCESS_SKIP_EXISTING: process.env.POSTPROCESS_SKIP_EXISTING || '',
   };
   requireSuccess(runStage('run-private-claude-sequence', ['node', 'scripts/run_claude_sequence.mjs'], { cwd: privateDir, env }), 'run-private-claude-sequence');
 }
@@ -170,7 +191,10 @@ function pushPrivateLogs(data, status, failedStage) {
   requireSuccess(runStage('git-config-name', ['git', 'config', 'user.name', 'github-actions[bot]'], { cwd: privateDir, secrets }), 'git-config-name');
   requireSuccess(runStage('git-config-email', ['git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], { cwd: privateDir, secrets }), 'git-config-email');
   const pathsToAdd = ['logs'];
-  if (existsSync(join(privateDir, 'outputs'))) pathsToAdd.push('outputs');
+  for (const candidate of ['outputs', 'articles']) {
+    if (existsSync(join(privateDir, candidate))) pathsToAdd.push(candidate);
+  }
+  if (existsSync(join(privateDir, 'site', 'data', 'articles.json'))) pathsToAdd.push('site/data/articles.json');
   requireSuccess(runStage('git-add-results', ['git', 'add', '-f', ...pathsToAdd], { cwd: privateDir, secrets }), 'git-add-results');
   const diff = runStage('git-diff-cached', ['git', 'diff', '--cached', '--quiet'], { cwd: privateDir, secrets });
   if (diff.status === 0) return;
