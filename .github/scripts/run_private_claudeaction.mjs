@@ -19,9 +19,13 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function textProvidersJson() {
+  return process.env.CLAUDE_PROVIDERS_JSON || process.env.CLAUDE_ACTION_PROVIDERS_JSON || '';
+}
+
 function providerSecretValues() {
   const values = [process.env.IMAGE_PROVIDER_API_KEY].filter(Boolean).map(String);
-  for (const envName of ['CLAUDE_ACTION_PROVIDERS_JSON', 'IMAGE_PROVIDERS_JSON']) {
+  for (const envName of ['CLAUDE_PROVIDERS_JSON', 'CLAUDE_ACTION_PROVIDERS_JSON', 'IMAGE_PROVIDERS_JSON']) {
     try {
       const parsed = JSON.parse(process.env[envName] || '[]');
       if (!Array.isArray(parsed)) continue;
@@ -38,6 +42,7 @@ function providerSecretValues() {
 function secretValues(extra = []) {
   return [
     process.env.PRIVATE_REPO_TOKEN || '',
+    process.env.CLAUDE_PROVIDERS_JSON || '',
     process.env.CLAUDE_ACTION_PROVIDERS_JSON || '',
     ...providerSecretValues(),
     ...extra,
@@ -128,10 +133,12 @@ function installClaudeCli() {
 }
 
 function runPrivateClaude(data) {
-  if (!process.env.CLAUDE_ACTION_PROVIDERS_JSON) throw new RunnerError('missing-provider-json');
+  const providersJson = textProvidersJson();
+  if (!providersJson) throw new RunnerError('missing-provider-json');
   const env = {
     CLAUDE_BIN: `${process.env.HOME}/.local/bin/claude`,
-    CLAUDE_ACTION_PROVIDERS_JSON: process.env.CLAUDE_ACTION_PROVIDERS_JSON,
+    CLAUDE_PROVIDERS_JSON: providersJson,
+    CLAUDE_ACTION_PROVIDERS_JSON: providersJson,
     CONTENT_SKILL_RUNS_JSON: data.contentSkillRunsJson,
     FINAL_PROMPT: data.finalPrompt,
     CLAUDE_ACTION_PROBE_TIMEOUT_MS: process.env.CLAUDE_ACTION_PROBE_TIMEOUT_MS || '180000',
