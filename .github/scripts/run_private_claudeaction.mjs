@@ -191,7 +191,7 @@ function pushPrivateLogs(data, status, failedStage) {
   requireSuccess(runStage('git-config-name', ['git', 'config', 'user.name', 'github-actions[bot]'], { cwd: privateDir, secrets }), 'git-config-name');
   requireSuccess(runStage('git-config-email', ['git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], { cwd: privateDir, secrets }), 'git-config-email');
   const pathsToAdd = ['logs'];
-  for (const candidate of ['outputs', 'articles']) {
+  for (const candidate of ['outputs', 'articles', 'state']) {
     if (existsSync(join(privateDir, candidate))) pathsToAdd.push(candidate);
   }
   if (existsSync(join(privateDir, 'site', 'data', 'articles.json'))) pathsToAdd.push('site/data/articles.json');
