@@ -2,7 +2,7 @@ name: clean_action_runs
 
 on:
   schedule:
-    - cron: '0 16 * * *'
+    - cron: '7 16 * * *'
 
 permissions:
   actions: write
