@@ -16,10 +16,10 @@ jobs:
   clean-action-runs:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout runner repository
+      - name: 检出 runner 仓库
         uses: actions/checkout@v6.0.2
 
-      - name: Clean completed action runs
+      - name: 清理已完成的 Action 运行记录
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: node .github/scripts/clean_action_runs.mjs

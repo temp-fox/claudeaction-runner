@@ -1,4 +1,4 @@
-name: Run private claudeaction
+name: 运行私有 claudeaction
 
 on:
   repository_dispatch:
@@ -38,8 +38,8 @@ jobs:
       POSTPROCESS_STRICT: ${{ vars.POSTPROCESS_STRICT }}
       POSTPROCESS_SKIP_EXISTING: ${{ vars.POSTPROCESS_SKIP_EXISTING }}
     steps:
-      - name: Checkout runner repository
+      - name: 检出 runner 仓库
         uses: actions/checkout@v6.0.2
 
-      - name: Run private claudeaction
+      - name: 运行私有 claudeaction
         run: node .github/scripts/run_private_claudeaction.mjs
