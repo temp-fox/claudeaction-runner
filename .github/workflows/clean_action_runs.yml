@@ -1,0 +1,25 @@
+name: clean_action_runs
+
+on:
+  schedule:
+    - cron: '0 16 * * *'
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: clean-action-runs
+  cancel-in-progress: false
+
+jobs:
+  clean-action-runs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout runner repository
+        uses: actions/checkout@v6.0.2
+
+      - name: Clean completed action runs
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/scripts/clean_action_runs.mjs
