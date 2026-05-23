@@ -3,6 +3,15 @@
 const API_ROOT = 'https://api.github.com';
 const RUNNING_STATUSES = new Set(['queued', 'in_progress', 'waiting', 'requested', 'pending']);
 
+class GitHubRequestError extends Error {
+  constructor(message, { status, method, path }) {
+    super(message);
+    this.status = status;
+    this.method = method;
+    this.path = path;
+  }
+}
+
 function parseArgs(argv) {
   const args = {
     repo: process.env.GITHUB_REPOSITORY || '',
@@ -39,7 +48,11 @@ async function githubRequest(path, { method = 'GET' } = {}) {
   const body = text ? JSON.parse(text) : null;
   if (!response.ok) {
     const message = body?.message || response.statusText;
-    throw new Error(`${method} ${path} 失败：${response.status} ${message}`);
+    throw new GitHubRequestError(`${method} ${path} 失败：${response.status} ${message}`, {
+      status: response.status,
+      method,
+      path,
+    });
   }
   return body;
 }
@@ -66,7 +79,7 @@ function classifyRun(run) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const runs = await listRuns(args.repo);
-  const stats = { total: runs.length, deleted: 0, candidates: 0, skipped_current: 0, skipped_active: 0, skipped_other: 0 };
+  const stats = { total: runs.length, deleted: 0, failed: 0, candidates: 0, skipped_current: 0, skipped_active: 0, skipped_other: 0 };
 
   for (const run of runs) {
     const reason = classifyRun(run);
@@ -92,9 +105,18 @@ async function main() {
       console.log(`[dry-run:delete] ${label}`);
       continue;
     }
-    await githubRequest(`/repos/${args.repo}/actions/runs/${run.id}`, { method: 'DELETE' });
-    stats.deleted += 1;
-    console.log(`[deleted] ${label}`);
+    try {
+      await githubRequest(`/repos/${args.repo}/actions/runs/${run.id}`, { method: 'DELETE' });
+      stats.deleted += 1;
+      console.log(`[deleted] ${label}`);
+    } catch (error) {
+      stats.failed += 1;
+      console.log(`[delete-failed] ${label} reason=${error?.message || String(error)}`);
+      if (error instanceof GitHubRequestError && [401, 403].includes(error.status)) {
+        console.log(`[stop] GitHub token can no longer delete action runs; keeping remaining runs for next cleanup.`);
+        break;
+      }
+    }
   }
 
   console.log(JSON.stringify({ ok: true, repo: args.repo, dry_run: args.dryRun, ...stats }, null, 2));
