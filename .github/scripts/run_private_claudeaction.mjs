@@ -70,7 +70,6 @@ function runStage(stage, args, { cwd = workspace, env = {}, secrets = secretValu
     cwd,
     env: { ...process.env, ...env },
     encoding: 'utf8',
-    timeout: Number.parseInt(process.env.RUNNER_STAGE_TIMEOUT_MS || '1800000', 10),
   });
   writeLog(`${stage}.log`, [
     `stage=${stage}`,
@@ -141,8 +140,6 @@ function runPrivateClaude(data) {
     CLAUDE_ACTION_PROVIDERS_JSON: providersJson,
     CONTENT_SKILL_RUNS_JSON: data.contentSkillRunsJson,
     FINAL_PROMPT: data.finalPrompt,
-    CLAUDE_ACTION_PROBE_TIMEOUT_MS: process.env.CLAUDE_ACTION_PROBE_TIMEOUT_MS || '180000',
-    CLAUDE_ACTION_FINAL_TIMEOUT_MS: process.env.CLAUDE_ACTION_FINAL_TIMEOUT_MS || '900000',
     CLAUDE_ACTION_ALLOWED_TOOLS: 'Read,Glob,Grep,Edit,Write,Bash(pwd),Bash(ls),Bash(git status --short),Bash(git diff),Bash(git log --oneline:*),Bash(python -m json.tool:*)',
     CLAUDE_ACTION_STREAM_JSON_LOGS: 'true',
     CLAUDE_ACTION_DISABLE_STEP_SUMMARY: 'true',
