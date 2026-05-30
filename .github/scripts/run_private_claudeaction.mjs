@@ -5,7 +5,7 @@ import { spawnSync } from 'node:child_process';
 const workspace = process.env.GITHUB_WORKSPACE;
 const runnerTemp = process.env.RUNNER_TEMP;
 const eventPath = process.env.GITHUB_EVENT_PATH;
-const privateDir = join(workspace, 'private-repo');
+const privateDir = join(runnerTemp, 'private-repo');
 const tempLogDir = join(runnerTemp, 'private-claudeaction-logs');
 
 class RunnerError extends Error {
