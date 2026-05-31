@@ -165,17 +165,19 @@ function runPrivateClaude(data) {
   requireSuccess(runStage('run-private-claude-sequence', ['node', 'scripts/run_claude_sequence.mjs'], { cwd: privateDir, env }), 'run-private-claude-sequence');
 }
 
+function copyTempLogsToPrivateTarget(target) {
+  if (!existsSync(tempLogDir)) return;
+  for (const name of readdirSync(tempLogDir)) {
+    copyFileSync(join(tempLogDir, name), join(target, name));
+  }
+}
+
 function copyRunnerLogsToPrivate(data, status, failedStage) {
   if (!existsSync(privateDir)) return null;
   const timestamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
   const runId = process.env.GITHUB_RUN_ID || 'unknown';
   const target = join(privateDir, 'logs', 'runner', `${timestamp}-${runId}`);
   mkdirSync(target, { recursive: true });
-  if (existsSync(tempLogDir)) {
-    for (const name of readdirSync(tempLogDir)) {
-      if (name.endsWith('.log')) copyFileSync(join(tempLogDir, name), join(target, name));
-    }
-  }
   writeJsonLog('runner-summary.log', {
     status,
     failed_stage: failedStage,
@@ -184,6 +186,7 @@ function copyRunnerLogsToPrivate(data, status, failedStage) {
     private_ref: data.privateRef,
     recorded_at: nowIso(),
   }, secretValues([data.privateRepository]));
+  copyTempLogsToPrivateTarget(target);
   copyFileSync(join(tempLogDir, 'runner-summary.log'), join(target, 'summary.json'));
   return target;
 }
@@ -235,17 +238,17 @@ function main() {
     status = 'failure';
     failedStage = error instanceof RunnerError ? error.stage : error?.name || 'unexpected-error';
     writeLog('runner-error.log', error?.stack || String(error), data ? secretValues([data.privateRepository]) : secretValues());
-    console.log(`[runner] failed; stage=${failedStage}; details will be pushed to private logs when possible`);
+    console.log('[runner] failed; details are recorded in private logs');
   }
 
   try {
     if (data) {
       pushPrivateLogs(data, status, failedStage);
-      console.log('[runner] private logs pushed');
+      console.log('[runner] private logs recorded');
     }
   } catch (error) {
     writeLog('push-private-logs-error.log', error?.stack || String(error), data ? secretValues([data.privateRepository]) : secretValues());
-    console.log('[runner] failed to push private logs');
+    console.log('[runner] failed to record private logs');
     process.exitCode = 1;
     return;
   }
