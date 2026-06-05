@@ -201,7 +201,9 @@ function pushPrivateLogs(data, status, failedStage) {
   for (const candidate of ['outputs', 'articles', 'state']) {
     if (existsSync(join(privateDir, candidate))) pathsToAdd.push(candidate);
   }
-  if (existsSync(join(privateDir, 'site', 'data', 'articles.json'))) pathsToAdd.push('site/data/articles.json');
+  for (const candidate of ['site/data/articles.json', 'site/data/batch-status.json']) {
+    if (existsSync(join(privateDir, candidate))) pathsToAdd.push(candidate);
+  }
   requireSuccess(runStage('git-add-results', ['git', 'add', '-f', ...pathsToAdd], { cwd: privateDir, secrets }), 'git-add-results');
   const diff = runStage('git-diff-cached', ['git', 'diff', '--cached', '--quiet'], { cwd: privateDir, secrets });
   if (diff.status === 0) return;
