@@ -7,6 +7,8 @@ const runnerTemp = process.env.RUNNER_TEMP;
 const eventPath = process.env.GITHUB_EVENT_PATH;
 const privateDir = join(runnerTemp, 'private-repo');
 const tempLogDir = join(runnerTemp, 'private-claudeaction-logs');
+const DEFAULT_RUNNER_TOTAL_TIMEOUT_MS = 3 * 60 * 60 * 1000;
+const PROCESS_KILL_GRACE_SECONDS = 30;
 
 class RunnerError extends Error {
   constructor(stage) {
@@ -15,8 +17,41 @@ class RunnerError extends Error {
   }
 }
 
+class RunnerTimeoutError extends RunnerError {
+  constructor(stage, timeoutMs) {
+    super(stage);
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 function nowIso() {
   return new Date().toISOString();
+}
+
+function positiveIntValue(value, fallback) {
+  const parsed = Number.parseInt(value ?? '', 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function runnerTotalTimeoutMs() {
+  return positiveIntValue(process.env.RUNNER_TOTAL_TIMEOUT_MS, DEFAULT_RUNNER_TOTAL_TIMEOUT_MS);
+}
+
+function remainingMs(deadlineMs) {
+  return Math.max(0, deadlineMs - Date.now());
+}
+
+function timeoutCommand(args, timeoutMs) {
+  if (process.platform === 'win32') return args;
+  return ['timeout', `--kill-after=${PROCESS_KILL_GRACE_SECONDS}s`, `${Math.max(1, Math.ceil(timeoutMs / 1000))}s`, ...args];
+}
+
+function isTimeoutResult(completed) {
+  return completed.status === 124
+    || completed.status === 137
+    || completed.signal === 'SIGTERM'
+    || completed.signal === 'SIGKILL'
+    || completed.error?.code === 'ETIMEDOUT';
 }
 
 function textProvidersJson() {
@@ -64,17 +99,24 @@ function writeJsonLog(name, payload, secrets = secretValues()) {
   writeLog(name, JSON.stringify(payload, null, 2), secrets);
 }
 
-function runStage(stage, args, { cwd = workspace, env = {}, secrets = secretValues() } = {}) {
+function runStage(stage, args, { cwd = workspace, env = {}, secrets = secretValues(), timeoutMs = null } = {}) {
   const startedAt = nowIso();
-  const completed = spawnSync(args[0], args.slice(1), {
+  const boundedArgs = timeoutMs ? timeoutCommand(args, timeoutMs) : args;
+  const completed = spawnSync(boundedArgs[0], boundedArgs.slice(1), {
     cwd,
     env: { ...process.env, ...env },
     encoding: 'utf8',
+    timeout: timeoutMs ? timeoutMs + PROCESS_KILL_GRACE_SECONDS * 1000 + 5000 : undefined,
   });
+  completed.runnerTimedOut = Boolean(timeoutMs && isTimeoutResult(completed));
+  completed.runnerTimeoutMs = timeoutMs || null;
   writeLog(`${stage}.log`, [
     `stage=${stage}`,
     `cwd=${cwd}`,
     `command=${JSON.stringify(args)}`,
+    `bounded_command=${JSON.stringify(boundedArgs)}`,
+    `timeout_ms=${timeoutMs || ''}`,
+    `runner_timed_out=${completed.runnerTimedOut}`,
     `exit_code=${completed.status}`,
     `signal=${completed.signal || ''}`,
     `started_at=${startedAt}`,
@@ -92,6 +134,7 @@ function runStage(stage, args, { cwd = workspace, env = {}, secrets = secretValu
 }
 
 function requireSuccess(completed, stage) {
+  if (completed.runnerTimedOut) throw new RunnerTimeoutError(stage, completed.runnerTimeoutMs);
   if (completed.status !== 0) throw new RunnerError(stage);
 }
 
@@ -131,9 +174,10 @@ function installClaudeCli() {
   requireSuccess(runStage('install-claude-cli', ['bash', '-lc', script]), 'install-claude-cli');
 }
 
-function runPrivateClaude(data) {
+function runPrivateClaude(data, timeoutMs) {
   const providersJson = textProvidersJson();
   if (!providersJson) throw new RunnerError('missing-provider-json');
+  if (timeoutMs <= 0) throw new RunnerTimeoutError('runner-total-timeout-before-private-claude', runnerTotalTimeoutMs());
   const env = {
     CLAUDE_BIN: `${process.env.HOME}/.local/bin/claude`,
     CLAUDE_PROVIDERS_JSON: providersJson,
@@ -161,8 +205,10 @@ function runPrivateClaude(data) {
     ARTICLE_IMAGE_BASE_URL: process.env.ARTICLE_IMAGE_BASE_URL || '',
     POSTPROCESS_STRICT: process.env.POSTPROCESS_STRICT || '',
     POSTPROCESS_SKIP_EXISTING: process.env.POSTPROCESS_SKIP_EXISTING || '',
+    RUNNER_TOTAL_TIMEOUT_MS: String(runnerTotalTimeoutMs()),
+    RUNNER_PRIVATE_STAGE_TIMEOUT_MS: String(timeoutMs),
   };
-  requireSuccess(runStage('run-private-claude-sequence', ['node', 'scripts/run_claude_sequence.mjs'], { cwd: privateDir, env }), 'run-private-claude-sequence');
+  requireSuccess(runStage('run-private-claude-sequence', ['node', 'scripts/run_claude_sequence.mjs'], { cwd: privateDir, env, timeoutMs }), 'run-private-claude-sequence');
 }
 
 function copyTempLogsToPrivateTarget(target) {
@@ -216,11 +262,13 @@ function pushPrivateLogs(data, status, failedStage) {
 
 function main() {
   mkdirSync(tempLogDir, { recursive: true });
+  const totalTimeoutMs = runnerTotalTimeoutMs();
+  const deadlineMs = Date.now() + totalTimeoutMs;
   let data = null;
   let status = 'success';
   let failedStage = null;
   try {
-    console.log('[runner] start');
+    console.log(`[runner] start; total timeout ${Math.round(totalTimeoutMs / 60000)}min`);
     data = payload();
     maskKnownSecrets(data.privateRepository);
     writeJsonLog('payload-summary.log', {
@@ -229,16 +277,30 @@ function main() {
       has_final_prompt: Boolean(data.finalPrompt),
       has_content_skill_runs_json: Boolean(data.contentSkillRunsJson),
       upstream_run_id: data.upstreamRunId,
+      total_timeout_ms: totalTimeoutMs,
+      deadline_at: new Date(deadlineMs).toISOString(),
       started_at: nowIso(),
     }, secretValues([data.privateRepository]));
     checkoutPrivate(data);
     console.log('[runner] private workspace ready');
     installClaudeCli();
-    runPrivateClaude(data);
+    runPrivateClaude(data, remainingMs(deadlineMs));
     console.log('[runner] private claudeaction completed');
   } catch (error) {
     status = 'failure';
-    failedStage = error instanceof RunnerError ? error.stage : error?.name || 'unexpected-error';
+    if (error instanceof RunnerTimeoutError) {
+      failedStage = `timeout:${error.stage}`;
+      writeJsonLog('runner-timeout.log', {
+        failed_stage: error.stage,
+        timeout_ms: error.timeoutMs,
+        total_timeout_ms: totalTimeoutMs,
+        deadline_at: new Date(deadlineMs).toISOString(),
+        recorded_at: nowIso(),
+        note: '运行触及 runner 总超时上限，已主动终止子进程；本次日志仍会被推送，可据此定位卡在哪个阶段',
+      }, data ? secretValues([data.privateRepository]) : secretValues());
+    } else {
+      failedStage = error instanceof RunnerError ? error.stage : error?.name || 'unexpected-error';
+    }
     writeLog('runner-error.log', error?.stack || String(error), data ? secretValues([data.privateRepository]) : secretValues());
     console.log('[runner] failed; details are recorded in private logs');
   }
