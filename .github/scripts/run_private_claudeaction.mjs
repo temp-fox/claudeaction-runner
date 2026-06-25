@@ -1,4 +1,5 @@
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { Buffer } from 'node:buffer';
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { spawnSync } from 'node:child_process';
 
@@ -9,6 +10,13 @@ const privateDir = join(runnerTemp, 'private-repo');
 const tempLogDir = join(runnerTemp, 'private-claudeaction-logs');
 const DEFAULT_RUNNER_TOTAL_TIMEOUT_MS = 3 * 60 * 60 * 1000;
 const PROCESS_KILL_GRACE_SECONDS = 30;
+const SPARSE_CHECKOUT_DIRS = ['.claude', '.github', 'docs', 'references', 'scripts', 'site', 'state', 'tests'];
+const RESULT_PATH_PREFIXES = ['articles/', 'logs/', 'outputs/', 'state/', 'site/data/'];
+const RESULT_PATHS = new Set(['state', 'site/data/articles.json', 'site/data/batch-status.json']);
+const GIT_ADD_BATCH_SIZE = 100;
+const LOG_MAX_CHARS = 2 * 1024 * 1024;
+const DEFERRED_LOG_MAX_CHARS = 1024 * 1024;
+const deferredLogs = [];
 
 class RunnerError extends Error {
   constructor(stage) {
@@ -90,13 +98,75 @@ function sanitize(text, secrets = secretValues()) {
   return result;
 }
 
-function writeLog(name, content, secrets = secretValues()) {
+function truncateLogContent(content, maxChars = LOG_MAX_CHARS) {
+  const text = String(content || '');
+  if (text.length <= maxChars) return text;
+  return [
+    `--- log truncated; kept last ${maxChars} chars of ${text.length} chars ---`,
+    text.slice(-maxChars),
+  ].join('\n');
+}
+
+function rememberDeferredLog(name, content, secrets = secretValues()) {
+  deferredLogs.push({
+    name,
+    content: sanitize(truncateLogContent(content, DEFERRED_LOG_MAX_CHARS), secrets),
+  });
+}
+
+function flushDeferredLogs(secrets = secretValues()) {
+  if (!deferredLogs.length) return;
   mkdirSync(tempLogDir, { recursive: true });
-  writeFileSync(join(tempLogDir, name), sanitize(content, secrets), 'utf8');
+  while (deferredLogs.length) {
+    const log = deferredLogs.shift();
+    writeFileSync(join(tempLogDir, `deferred-${log.name}`), sanitize(log.content, secrets), 'utf8');
+  }
+}
+
+function writeLog(name, content, secrets = secretValues()) {
+  try {
+    mkdirSync(tempLogDir, { recursive: true });
+    writeFileSync(join(tempLogDir, name), sanitize(truncateLogContent(content), secrets), 'utf8');
+  } catch (error) {
+    if (error?.code !== 'ENOSPC') throw error;
+    rememberDeferredLog(name, content, secrets);
+    console.log(`[runner] deferred log ${name}: no space left on device`);
+  }
 }
 
 function writeJsonLog(name, payload, secrets = secretValues()) {
   writeLog(name, JSON.stringify(payload, null, 2), secrets);
+}
+
+function diskUsageScript(label) {
+  return [
+    `echo "label=${label}"`,
+    'echo "recorded_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"',
+    'echo "--- df -h ---"',
+    'df -h',
+    'echo "--- workspace du ---"',
+    'du -h -d 2 "$GITHUB_WORKSPACE" 2>/dev/null | sort -h | tail -80 || true',
+    'echo "--- runner temp du ---"',
+    'du -h -d 2 "$RUNNER_TEMP" 2>/dev/null | sort -h | tail -80 || true',
+    'if [ -d "$RUNNER_TEMP/private-repo" ]; then echo "--- private repo du ---"; du -h -d 2 "$RUNNER_TEMP/private-repo" 2>/dev/null | sort -h | tail -120 || true; fi',
+  ].join('\n');
+}
+
+function recordDiskUsage(label, secrets = secretValues()) {
+  const completed = spawnSync('bash', ['-lc', diskUsageScript(label)], {
+    cwd: workspace,
+    env: { ...process.env },
+    encoding: 'utf8',
+  });
+  writeLog(`disk-${label}.log`, [
+    `label=${label}`,
+    `exit_code=${completed.status}`,
+    `signal=${completed.signal || ''}`,
+    '--- stdout ---',
+    completed.stdout || '',
+    '--- stderr ---',
+    completed.stderr || '',
+  ].join('\n'), secrets);
 }
 
 function runStage(stage, args, { cwd = workspace, env = {}, secrets = secretValues(), timeoutMs = null } = {}) {
@@ -165,7 +235,12 @@ function checkoutPrivate(data) {
   if (!token) throw new RunnerError('checkout-private');
   const repoUrl = `https://x-access-token:${token}@github.com/${data.privateRepository}.git`;
   const secrets = secretValues([repoUrl, data.privateRepository]);
-  requireSuccess(runStage('checkout-private', ['git', 'clone', '--quiet', '--branch', data.privateRef, repoUrl, privateDir], { secrets }), 'checkout-private');
+  requireSuccess(runStage('clone-private-metadata', [
+    'git', 'clone', '--quiet', '--filter=blob:none', '--depth=1', '--no-checkout', '--branch', data.privateRef, repoUrl, privateDir,
+  ], { secrets }), 'clone-private-metadata');
+  requireSuccess(runStage('sparse-checkout-init', ['git', 'sparse-checkout', 'init', '--cone'], { cwd: privateDir, secrets }), 'sparse-checkout-init');
+  requireSuccess(runStage('sparse-checkout-set', ['git', 'sparse-checkout', 'set', ...SPARSE_CHECKOUT_DIRS], { cwd: privateDir, secrets }), 'sparse-checkout-set');
+  requireSuccess(runStage('checkout-private', ['git', 'checkout', '--quiet', data.privateRef], { cwd: privateDir, secrets }), 'checkout-private');
   requireSuccess(runStage('set-private-origin', ['git', 'remote', 'set-url', 'origin', repoUrl], { cwd: privateDir, secrets }), 'set-private-origin');
 }
 
@@ -214,8 +289,110 @@ function runPrivateClaude(data, timeoutMs) {
 function copyTempLogsToPrivateTarget(target) {
   if (!existsSync(tempLogDir)) return;
   for (const name of readdirSync(tempLogDir)) {
-    copyFileSync(join(tempLogDir, name), join(target, name));
+    try {
+      copyFileSync(join(tempLogDir, name), join(target, name));
+    } catch (error) {
+      if (error?.code !== 'ENOSPC') throw error;
+      rememberDeferredLog(`copy-${name}.log`, error?.stack || String(error));
+      console.log(`[runner] deferred copied log ${name}: no space left on device`);
+    }
   }
+}
+
+function tempLogEntries(secrets = secretValues()) {
+  const entries = [];
+  if (existsSync(tempLogDir)) {
+    for (const name of readdirSync(tempLogDir)) {
+      try {
+        entries.push({ name, content: sanitize(readFileSync(join(tempLogDir, name), 'utf8'), secrets) });
+      } catch (error) {
+        entries.push({ name: `read-${name}-error.log`, content: sanitize(error?.stack || String(error), secrets) });
+      }
+    }
+  }
+  for (const log of deferredLogs) entries.push({ name: `deferred-${log.name}`, content: sanitize(log.content, secrets) });
+  return entries;
+}
+
+async function putPrivateLogFile(data, runDir, name, content, secrets) {
+  const token = process.env.PRIVATE_REPO_TOKEN || '';
+  if (!token) throw new RunnerError('github-api-log-token');
+  const safeName = name.replace(/[^A-Za-z0-9._-]/g, '-');
+  const response = await fetch(`https://api.github.com/repos/${data.privateRepository}/contents/${runDir}/${safeName}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      message: `chore: record runner fallback log ${process.env.GITHUB_RUN_ID || 'unknown'}`,
+      content: Buffer.from(sanitize(content, secrets)).toString('base64'),
+      branch: data.privateRef,
+    }),
+  });
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(`GitHub log API failed ${response.status}: ${sanitize(body, secrets)}`);
+  }
+}
+
+async function pushPrivateLogsViaApi(data, status, failedStage, cause) {
+  const secrets = secretValues([data.privateRepository]);
+  const timestamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
+  const runId = process.env.GITHUB_RUN_ID || 'unknown';
+  const runDir = `logs/runner/${timestamp}-${runId}`;
+  const summary = {
+    status,
+    failed_stage: failedStage,
+    public_runner_run_id: runId,
+    upstream_private_run_id: data.upstreamRunId,
+    private_ref: data.privateRef,
+    recorded_at: nowIso(),
+    fallback: 'github-contents-api',
+    fallback_cause: cause?.stack || String(cause || ''),
+  };
+  await putPrivateLogFile(data, runDir, 'summary.json', JSON.stringify(summary, null, 2), secrets);
+  await putPrivateLogFile(data, runDir, 'runner-summary.log', JSON.stringify(summary, null, 2), secrets);
+  const entries = tempLogEntries(secrets);
+  for (const entry of entries) await putPrivateLogFile(data, runDir, entry.name, entry.content, secrets);
+}
+
+function cleanupFailureArtifacts() {
+  if (!existsSync(privateDir)) return;
+  const removed = [];
+  for (const candidate of ['articles', 'outputs']) {
+    const target = join(privateDir, candidate);
+    if (!existsSync(target)) continue;
+    rmSync(target, { recursive: true, force: true });
+    removed.push(candidate);
+  }
+  writeJsonLog('failure-artifact-cleanup.log', {
+    removed,
+    note: '失败路径优先确保 runner 日志能写回 logs；本次生成的大产物不会在失败提交中保留',
+    recorded_at: nowIso(),
+  });
+}
+
+function gitAddPaths(paths, secrets) {
+  for (let index = 0; index < paths.length; index += GIT_ADD_BATCH_SIZE) {
+    const batch = paths.slice(index, index + GIT_ADD_BATCH_SIZE);
+    requireSuccess(runStage(`git-add-results-${index / GIT_ADD_BATCH_SIZE + 1}`, ['git', 'add', '--sparse', '-f', ...batch], { cwd: privateDir, secrets }), 'git-add-results');
+  }
+}
+
+function resultPathsToAdd(status) {
+  if (status !== 'success') return ['logs'];
+  const statusResult = runStage('git-status-results', ['git', 'status', '--porcelain', '--untracked-files=all', '--', ...Array.from(new Set([...RESULT_PATH_PREFIXES, ...RESULT_PATHS]))], { cwd: privateDir });
+  if (statusResult.status !== 0) throw new RunnerError('git-status-results');
+  const paths = new Set(['logs']);
+  for (const line of String(statusResult.stdout || '').split('\n')) {
+    const path = line.slice(3).trim();
+    if (!path) continue;
+    if (RESULT_PATHS.has(path) || RESULT_PATH_PREFIXES.some((prefix) => path.startsWith(prefix))) paths.add(path);
+  }
+  return Array.from(paths).sort();
 }
 
 function copyRunnerLogsToPrivate(data, status, failedStage) {
@@ -223,6 +400,7 @@ function copyRunnerLogsToPrivate(data, status, failedStage) {
   const timestamp = new Date().toISOString().replace(/[-:]/g, '').slice(0, 15);
   const runId = process.env.GITHUB_RUN_ID || 'unknown';
   const target = join(privateDir, 'logs', 'runner', `${timestamp}-${runId}`);
+  flushDeferredLogs(secretValues([data.privateRepository]));
   mkdirSync(target, { recursive: true });
   writeJsonLog('runner-summary.log', {
     status,
@@ -232,25 +410,20 @@ function copyRunnerLogsToPrivate(data, status, failedStage) {
     private_ref: data.privateRef,
     recorded_at: nowIso(),
   }, secretValues([data.privateRepository]));
+  flushDeferredLogs(secretValues([data.privateRepository]));
   copyTempLogsToPrivateTarget(target);
   copyFileSync(join(tempLogDir, 'runner-summary.log'), join(target, 'summary.json'));
   return target;
 }
 
 function pushPrivateLogs(data, status, failedStage) {
+  if (status !== 'success') cleanupFailureArtifacts();
   const logDir = copyRunnerLogsToPrivate(data, status, failedStage);
   if (!logDir) return;
   const secrets = secretValues([data.privateRepository]);
   requireSuccess(runStage('git-config-name', ['git', 'config', 'user.name', 'github-actions[bot]'], { cwd: privateDir, secrets }), 'git-config-name');
   requireSuccess(runStage('git-config-email', ['git', 'config', 'user.email', '41898282+github-actions[bot]@users.noreply.github.com'], { cwd: privateDir, secrets }), 'git-config-email');
-  const pathsToAdd = ['logs'];
-  for (const candidate of ['outputs', 'articles', 'state']) {
-    if (existsSync(join(privateDir, candidate))) pathsToAdd.push(candidate);
-  }
-  for (const candidate of ['site/data/articles.json', 'site/data/batch-status.json']) {
-    if (existsSync(join(privateDir, candidate))) pathsToAdd.push(candidate);
-  }
-  requireSuccess(runStage('git-add-results', ['git', 'add', '-f', ...pathsToAdd], { cwd: privateDir, secrets }), 'git-add-results');
+  gitAddPaths(resultPathsToAdd(status), secrets);
   const diff = runStage('git-diff-cached', ['git', 'diff', '--cached', '--quiet'], { cwd: privateDir, secrets });
   if (diff.status === 0) return;
   if (diff.status !== 1) throw new RunnerError('git-diff-cached');
@@ -260,7 +433,7 @@ function pushPrivateLogs(data, status, failedStage) {
   requireSuccess(runStage('git-push-logs', ['git', 'push', 'origin', `HEAD:${data.privateRef}`], { cwd: privateDir, secrets }), 'git-push-logs');
 }
 
-function main() {
+async function main() {
   mkdirSync(tempLogDir, { recursive: true });
   const totalTimeoutMs = runnerTotalTimeoutMs();
   const deadlineMs = Date.now() + totalTimeoutMs;
@@ -281,10 +454,14 @@ function main() {
       deadline_at: new Date(deadlineMs).toISOString(),
       started_at: nowIso(),
     }, secretValues([data.privateRepository]));
+    recordDiskUsage('start', secretValues([data.privateRepository]));
     checkoutPrivate(data);
+    recordDiskUsage('after-checkout-private', secretValues([data.privateRepository]));
     console.log('[runner] private workspace ready');
     installClaudeCli();
+    recordDiskUsage('after-install-claude-cli', secretValues([data.privateRepository]));
     runPrivateClaude(data, remainingMs(deadlineMs));
+    recordDiskUsage('after-private-claude', secretValues([data.privateRepository]));
     console.log('[runner] private claudeaction completed');
   } catch (error) {
     status = 'failure';
@@ -302,6 +479,7 @@ function main() {
       failedStage = error instanceof RunnerError ? error.stage : error?.name || 'unexpected-error';
     }
     writeLog('runner-error.log', error?.stack || String(error), data ? secretValues([data.privateRepository]) : secretValues());
+    if (data) recordDiskUsage('on-error', secretValues([data.privateRepository]));
     console.log('[runner] failed; details are recorded in private logs');
   }
 
@@ -312,11 +490,27 @@ function main() {
     }
   } catch (error) {
     writeLog('push-private-logs-error.log', error?.stack || String(error), data ? secretValues([data.privateRepository]) : secretValues());
-    console.log('[runner] failed to record private logs');
-    process.exitCode = 1;
-    return;
+    console.log('[runner] failed to record private logs via git; trying GitHub contents API fallback');
+    if (data) {
+      try {
+        await pushPrivateLogsViaApi(data, status, failedStage, error);
+        console.log('[runner] private logs recorded via GitHub contents API fallback');
+      } catch (fallbackError) {
+        console.log('[runner] failed to record private logs via fallback');
+        console.log(sanitize(fallbackError?.stack || String(fallbackError), secretValues([data.privateRepository])));
+        process.exitCode = 1;
+        return;
+      }
+    } else {
+      process.exitCode = 1;
+      return;
+    }
   }
   process.exitCode = status === 'success' ? 0 : 1;
 }
 
-main();
+main().catch((error) => {
+  console.log('[runner] unexpected top-level failure');
+  console.log(sanitize(error?.stack || String(error)));
+  process.exitCode = 1;
+});
